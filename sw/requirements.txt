@@ -1,0 +1,24 @@
+# AI 모델 팀
+numpy>=1.21.0
+opencv-python>=4.5.0
+tflite-runtime>=2.10.0  # 또는 tensorflow>=2.10.0
+# torch>=1.10.0  # PyTorch 사용 시
+
+# YOLO
+# ultralytics>=8.0.0  # YOLOv5/v8 사용 시
+
+# Liveness 검증
+mediapipe>=0.9.0
+# dlib>=19.22.0  # Dlib 사용 시
+
+# 전처리/캡쳐 팀
+# picamera2>=0.3.0  # 라즈베리파이에서만
+# pillow>=9.0.0
+
+# 공통
+# scipy>=1.7.0
+# scikit-learn>=1.0.0
+
+# 개발 도구
+pytest>=7.0.0
+pytest-cov>=3.0.0

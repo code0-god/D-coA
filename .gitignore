@@ -1,0 +1,26 @@
+__pycache__/
+*.py[cod]
+*.so
+*.log
+*.tmp
+
+# Python virtual environments
+.venv/
+venv/
+env/
+
+# Build / coverage artifacts
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.coverage
+
+# Project-specific generated directories
+sw/logs/
+sw/cache/
+sw/ai_model/models/
+
+# OS artifacts
+.DS_Store
+Thumbs.db
