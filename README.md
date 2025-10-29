@@ -247,7 +247,7 @@ TODO 주석 예시:
 
 ---
 
-## 7. 자주 묻는 질문(FAQ) & 트러블슈팅
+## 7. TroubleShooting
 
 ### Q1. `pip install -r requirements.txt` 실행 중 `python-prctl` 관련 오류가 발생한다.
 - 라즈베리 파이가 아닌 환경이라면 `picamera2` 항목을 주석 처리한 상태로 유지한다.
