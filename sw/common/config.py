@@ -26,7 +26,39 @@ CAMERA_CONFIG = {
     "width": 640,
     "height": 480,
     "fps": 30,
-    "format": "RGB888"
+    "format": "RGB888",
+    "picamera": {
+        # Picamera2 create_video_configuration kwargs
+        "main": {
+            "size": (640, 480),
+            "format": "RGB888",
+        },
+        "controls": {
+            # Picamera2 expects FrameRate as Rational, fallback handled in code
+            "FrameRate": 30.0,
+        },
+        "buffer_count": 4,
+        "transform": None,
+        # capture controls
+        "use_capture_array": True,
+        "stream_name": "main",
+        "capture_timeout": 0.5,
+        "post_start_controls": {},
+    },
+    "stream": {
+        "retries": 3,
+        "retry_delay": 1.5,  # seconds
+        "backend": "auto",  # auto | ffmpeg | gstreamer
+        "open_timeout_ms": 5000,
+        "read_timeout_ms": 5000,
+        "auth": {
+            "username": "",
+            "password": "",
+        },
+        "ffmpeg_options": {
+            # Example: {"rtsp_transport": "tcp", "stimeout": "5000000"}
+        },
+    },
 }
 
 # AI 모델 설정

@@ -12,8 +12,11 @@ import sys
 from pathlib import Path
 sys.path.append(str(Path(__file__).parent.parent))
 
-import time
 import argparse
+import multiprocessing as mp
+import queue
+import time
+from multiprocessing.context import BaseContext
 from threading import Event, Thread
 from typing import Optional
 
@@ -32,6 +35,113 @@ from ai_model import inference
 logger = get_logger(__name__)
 
 
+def _inference_process_entry(
+    frame_queue: mp.Queue,
+    result_queue: mp.Queue,
+    stop_event: mp.Event,
+    perf_config: dict,
+):
+    """멀티프로세스 추론 프로세스 엔트리 포인트"""
+    process_logger = get_logger(__name__ + ".inference_process")
+    log_interval = float(perf_config.get("log_interval", 10.0))
+    frame_count = 0
+    pass_count = 0
+    total_inference_time = 0.0
+    last_log_time = time.time()
+
+    try:
+        inference.setup()
+    except Exception as exc:
+        process_logger.error(f"Inference setup failed: {exc}", exc_info=True)
+        try:
+            result_queue.put(
+                {"event": "setup_failed", "error": str(exc)}, timeout=0.5
+            )
+        except queue.Full:
+            pass
+        try:
+            result_queue.put(None, timeout=0.5)
+        except queue.Full:
+            pass
+        return
+
+    try:
+        while True:
+            if stop_event.is_set() and frame_queue.empty():
+                break
+            try:
+                frame = frame_queue.get(timeout=0.3)
+            except queue.Empty:
+                if stop_event.is_set():
+                    break
+                continue
+
+            if frame is None:
+                break
+
+            start_time = time.time()
+            try:
+                pass_flag, result = inference.analyze(frame)
+            except Exception as exc:
+                process_logger.error(f"Inference analyze error: {exc}", exc_info=True)
+                continue
+
+            inference_time = time.time() - start_time
+            frame_count += 1
+            total_inference_time += inference_time
+            if pass_flag:
+                pass_count += 1
+
+            result_data = {
+                "frame_index": frame_count,
+                "timestamp": time.time(),
+                "pass": pass_flag,
+                "result": result,
+                "inference_time": inference_time,
+            }
+
+            try:
+                result_queue.put(result_data, timeout=0.3)
+            except queue.Full:
+                process_logger.warning("Result queue is full; dropping inference result")
+
+            if (
+                log_interval > 0
+                and frame_count > 0
+                and (time.time() - last_log_time) >= log_interval
+            ):
+                avg_time_ms = (
+                    (total_inference_time / frame_count) * 1000.0
+                    if frame_count > 0
+                    else 0.0
+                )
+                pass_rate = pass_count / frame_count * 100.0
+                process_logger.info(
+                    "Inference process: %d frames, pass %.1f%%, avg %.1f ms",
+                    frame_count,
+                    pass_rate,
+                    avg_time_ms,
+                )
+                last_log_time = time.time()
+
+    except Exception as exc:
+        process_logger.error(f"Inference process error: {exc}", exc_info=True)
+    finally:
+        try:
+            stats = inference.get_statistics()
+        except Exception:
+            stats = {}
+        try:
+            result_queue.put(
+                {"event": "inference_shutdown", "stats": stats}, timeout=0.5
+            )
+        except queue.Full:
+            pass
+        try:
+            result_queue.put(None, timeout=0.5)
+        except queue.Full:
+            pass
+        inference.teardown()
 class FrameCaptureSystem:
     """프레임 캡처 및 처리 시스템"""
     
@@ -67,6 +177,12 @@ class FrameCaptureSystem:
         # 실행 제어
         self.capture_thread: Optional[Thread] = None
         self.inference_thread: Optional[Thread] = None
+        self.inference_process: Optional[mp.Process] = None
+        self._result_collector_thread: Optional[Thread] = None
+        self._mp_context: Optional[BaseContext] = None
+        self._mp_frame_queue: Optional[mp.Queue] = None
+        self._mp_result_queue: Optional[mp.Queue] = None
+        self._mp_stop_event: Optional[mp.Event] = None
         self._stop_event = Event()
         self.streamer: Optional[FrameStreamer] = None
         
@@ -97,6 +213,26 @@ class FrameCaptureSystem:
         if self.streamer is not None:
             self.streamer.stop()
             self.streamer = None
+
+    def _result_collector_loop(self, result_queue: mp.Queue, mp_stop_event: mp.Event):
+        """멀티프로세스 추론 결과 수집"""
+        logger.info("Result collector thread started")
+        try:
+            while not self._stop_event.is_set():
+                try:
+                    item = result_queue.get(timeout=0.3)
+                except queue.Empty:
+                    if mp_stop_event.is_set():
+                        break
+                    continue
+
+                if item is None:
+                    break
+                self.frame_buffer.put_result(item)
+        except Exception as exc:
+            logger.error(f"Result collector error: {exc}", exc_info=True)
+        finally:
+            logger.info("Result collector thread stopped")
     
     def capture_loop(self):
         """
@@ -111,25 +247,27 @@ class FrameCaptureSystem:
         fps_timer = time.time()
         fps_counter = 0
         
+        failure_count = 0
+        max_failure = 30
+
         try:
             while not self._stop_event.is_set() and self.frame_buffer.is_running():
                 start_time = time.time()
-                
-                # TODO(FrameCaptureSystem.capture_loop, L87-L143): 실제 캡처 파이프라인 구성
-                #  - CameraSource.read 반환값 검증 및 재시도 정책 적용
-                #  - FramePreprocessor 옵션을 CONFIG와 연동
-                logger.warning(
-                    "FrameCaptureSystem.capture_loop: 재시도/전처리 구성 로직이 미구현 상태입니다."
-                )
-                
-                
+
                 # 1. 카메라에서 프레임 읽기
                 ret, frame = self.camera.read()
-                
+
                 if not ret or frame is None:
-                    logger.warning("Failed to read frame")
-                    time.sleep(0.01)
+                    failure_count += 1
+                    if failure_count >= max_failure:
+                        logger.error("Camera read failed repeatedly; waiting before retry")
+                        time.sleep(0.5)
+                        failure_count = 0
+                    else:
+                        time.sleep(0.01)
                     continue
+
+                failure_count = 0
                 
                 # 2. 전처리
                 processed_frame = self.preprocessor.process(
@@ -207,38 +345,30 @@ class FrameCaptureSystem:
                 if not self.frame_buffer.is_running() and not self.frame_buffer.has_frames():
                     break
 
-                # TODO(FrameCaptureSystem.inference_loop, L170-L214): 추론 파이프라인 구현
-                #  - ai_model.inference.analyze 대신 실제 배치/큐 로직 구성
-                #  - 결과 저장 구조(common.frame_buffer) 확장
-                logger.warning(
-                    "FrameCaptureSystem.inference_loop: 실제 추론 파이프라인이 연결되어 있지 않습니다."
-                )
-                
-                
-                # 1. 프레임 버퍼에서 프레임 가져오기
+                # 1. 공유 버퍼에서 프레임 가져오기
                 frame = self.frame_buffer.get_frame(timeout=0.1)
-                
+
                 if frame is None:
                     continue
-                
+
                 # 2. AI 추론 수행
                 start_time = time.time()
                 pass_flag, result = inference.analyze(frame)
                 inference_time = time.time() - start_time
-                
+
                 frame_count += 1
                 if pass_flag:
                     pass_count += 1
-                
+
                 # 3. 결과 저장
                 result_data = {
                     "frame_id": frame_count,
                     "pass_flag": pass_flag,
                     "inference_time": inference_time,
-                    "result": result
+                    "result": result,
                 }
                 self.frame_buffer.put_result(result_data)
-                
+
                 # 주기적 로깅
                 if frame_count % 30 == 0:
                     pass_rate = pass_count / frame_count * 100
@@ -313,42 +443,142 @@ class FrameCaptureSystem:
         Args:
             duration: 실행 시간 (초), None이면 무한
         """
-        logger.info("Running in multi-thread mode (Producer-Consumer)")
-        
-        # TODO(FrameCaptureSystem.run_multiprocess, L279-L314): 멀티프로세스 요구사항 재검토
-        #  - 프로세스 분리 시 IPC/큐 설계 업데이트
-        #  - 리소스 종료 및 예외 처리 시나리오 명세
-        
-        
+        logger.info("Running in multiprocess mode (capture thread + inference process)")
+
+        try:
+            self._mp_context = mp.get_context("spawn")
+        except ValueError:
+            self._mp_context = mp.get_context()
+
         # 실행 준비
         self._stop_event.clear()
         self.frame_buffer.start()
         self._start_streamer()
-        
-        # 스레드 생성
-        self.capture_thread = Thread(target=self.capture_loop, name="CaptureThread", daemon=True)
-        self.inference_thread = Thread(target=self.inference_loop, name="InferenceThread", daemon=True)
-        
-        # 스레드 시작
+
+        frame_queue_size = 4
+        result_queue_size = 16
+        assert self._mp_context is not None  # for type checkers
+        self._mp_frame_queue = self._mp_context.Queue(maxsize=frame_queue_size)
+        self._mp_result_queue = self._mp_context.Queue(maxsize=result_queue_size)
+        self._mp_stop_event = self._mp_context.Event()
+
+        # 결과 수집 스레드
+        self._result_collector_thread = Thread(
+            target=self._result_collector_loop,
+            name="ResultCollector",
+            daemon=True,
+            args=(self._mp_result_queue, self._mp_stop_event),
+        )
+        self._result_collector_thread.start()
+
+        frame_queue = self._mp_frame_queue
+        mp_stop_event = self._mp_stop_event
+
+        def capture_worker():
+            logger.info("Capture worker (multiprocess) started")
+            if frame_queue is None or mp_stop_event is None:
+                logger.error("Multiprocess queues are not initialized")
+                return
+
+            fps_timer = time.time()
+            fps_counter = 0
+            drop_count = 0
+            failure_count = 0
+            max_failure = 30
+
+            try:
+                while not self._stop_event.is_set() and not mp_stop_event.is_set():
+                    start_time = time.time()
+                    ret, frame = self.camera.read() if self.camera else (False, None)
+
+                    if not ret or frame is None:
+                        failure_count += 1
+                        if failure_count >= max_failure:
+                            logger.error(
+                                "Camera read failed repeatedly (multiprocess); waiting before retry"
+                            )
+                            time.sleep(0.5)
+                        continue
+
+                    failure_count = 0
+                    processed = self.preprocessor.process(frame, resize=True)
+                    if processed is None:
+                        continue
+
+                    if self.streamer:
+                        self.streamer.push_frame(processed)
+
+                    try:
+                        frame_queue.put(processed, timeout=0.2)
+                    except queue.Full:
+                        drop_count += 1
+                        if drop_count % 30 == 0:
+                            logger.warning(
+                                "Frame queue full in multiprocess mode; dropped %d frames",
+                                drop_count,
+                            )
+                        continue
+
+                    process_time = time.time() - start_time
+                    self.perf_monitor.update(process_time)
+                    fps_counter += 1
+                    now = time.time()
+                    if now - fps_timer >= PERFORMANCE_CONFIG["fps_update_interval"]:
+                        fps_value = fps_counter / (now - fps_timer)
+                        self.frame_buffer.update_fps(fps_value)
+                        fps_timer = now
+                        fps_counter = 0
+
+            except Exception as exc:
+                logger.error(f"Capture worker error: {exc}", exc_info=True)
+            finally:
+                if frame_queue is not None:
+                    try:
+                        frame_queue.put_nowait(None)
+                    except queue.Full:
+                        try:
+                            frame_queue.get_nowait()
+                            frame_queue.put_nowait(None)
+                        except queue.Empty:
+                            pass
+                logger.info("Capture worker (multiprocess) stopped")
+
+        self.capture_thread = Thread(
+            target=capture_worker, name="CaptureThread", daemon=True
+        )
         self.capture_thread.start()
-        self.inference_thread.start()
-        
+        self.inference_thread = None
+
+        # 추론 프로세스 시작
         try:
-            # 실행 시간 제한
+            self.inference_process = self._mp_context.Process(
+                target=_inference_process_entry,
+                name="InferenceProcess",
+                args=(
+                    self._mp_frame_queue,
+                    self._mp_result_queue,
+                    self._mp_stop_event,
+                    PERFORMANCE_CONFIG,
+                ),
+            )
+            self.inference_process.start()
+        except Exception as exc:
+            logger.error(f"Failed to start inference process: {exc}", exc_info=True)
+            self.stop()
+            return
+
+        try:
             if duration:
                 time.sleep(duration)
                 self.stop()
             else:
-                # 무한 실행
                 while not self._stop_event.is_set():
-                    active_threads = [
-                        thread for thread in (self.capture_thread, self.inference_thread)
-                        if thread and thread.is_alive()
-                    ]
-                    if not active_threads:
+                    if self.inference_process and not self.inference_process.is_alive():
+                        logger.warning("Inference process exited unexpectedly")
+                        self.stop()
                         break
                     time.sleep(0.2)
-        
+
         except KeyboardInterrupt:
             logger.info("Interrupted by user")
             self.stop()
@@ -359,6 +589,20 @@ class FrameCaptureSystem:
         
         # 실행 중지
         self._stop_event.set()
+        if self._mp_stop_event is not None:
+            self._mp_stop_event.set()
+
+        if self._mp_frame_queue is not None:
+            try:
+                self._mp_frame_queue.put_nowait(None)
+            except queue.Full:
+                pass
+        if self._mp_result_queue is not None:
+            try:
+                self._mp_result_queue.put_nowait(None)
+            except queue.Full:
+                pass
+
         self.frame_buffer.stop()
         
         # 스레드 종료 대기
@@ -366,9 +610,32 @@ class FrameCaptureSystem:
             self.capture_thread.join(timeout=5.0)
         if self.inference_thread and self.inference_thread.is_alive():
             self.inference_thread.join(timeout=5.0)
+        if self.inference_process and self.inference_process.is_alive():
+            self.inference_process.join(timeout=5.0)
+            if self.inference_process.is_alive():
+                logger.warning("Inference process did not exit gracefully; terminating")
+                self.inference_process.terminate()
+                self.inference_process.join(timeout=2.0)
+        if self._result_collector_thread and self._result_collector_thread.is_alive():
+            self._result_collector_thread.join(timeout=3.0)
         
         self.capture_thread = None
         self.inference_thread = None
+        self.inference_process = None
+        self._result_collector_thread = None
+
+        for mp_queue in (self._mp_frame_queue, self._mp_result_queue):
+            if mp_queue is not None:
+                try:
+                    mp_queue.close()
+                    mp_queue.join_thread()
+                except (AttributeError, ValueError, OSError):
+                    pass
+        self._mp_frame_queue = None
+        self._mp_result_queue = None
+        self._mp_stop_event = None
+        self._mp_context = None
+        
         self._stop_streamer()
         
         logger.info("FrameCaptureSystem stopped")

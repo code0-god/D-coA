@@ -7,20 +7,30 @@
 - 개발 환경(aarch64 서버)과 배포 환경(라즈베리파이) 모두 지원
 """
 
+import os
 import sys
 from pathlib import Path
 sys.path.append(str(Path(__file__).parent.parent))
 
 import numpy as np
 import cv2
-from typing import Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from abc import ABC, abstractmethod
+from fractions import Fraction
+from contextlib import contextmanager
 import time
+from threading import Lock
+from urllib.parse import urlparse, urlunparse
 
 from common.config import CAMERA_CONFIG
 from common.logger import get_logger
 
 logger = get_logger(__name__)
+
+try:
+    from picamera2 import Picamera2  # type: ignore
+except ImportError:  # pragma: no cover - Picamera2가 없는 환경
+    Picamera2 = None
 
 
 class CameraSource(ABC):
@@ -57,23 +67,182 @@ class PiCameraSource(CameraSource):
     def __init__(self):
         self.camera = None
         self.config = CAMERA_CONFIG
+        self._lock = Lock()
+        self._cleanup_callbacks: List[Tuple[str, Callable[[], None]]] = []
+        self._picamera_config = dict(self.config.get("picamera", {}))
+        self._capture_stream = self._picamera_config.get("stream_name", "main")
+        self._use_capture_array = bool(self._picamera_config.get("use_capture_array", True))
         logger.info("PiCameraSource initialized")
+
+    def register_cleanup(self, name: str, callback: Callable[[], None]) -> None:
+        """외부 리소스 해제 콜백 등록"""
+        self._cleanup_callbacks.append((name, callback))
+
+    def _normalize_controls(self, controls: Dict[str, Any]) -> Dict[str, Any]:
+        normalized: Dict[str, Any] = {}
+        for key, value in controls.items():
+            if not key:
+                continue
+            normalized_key = "FrameRate" if key.lower() == "framerate" else key
+            control_value = value
+            if normalized_key == "FrameRate" and not isinstance(value, Fraction):
+                try:
+                    if isinstance(value, (int, float)):
+                        control_value = Fraction(value).limit_denominator(120)
+                    else:
+                        control_value = Fraction(str(value))
+                except (ValueError, ZeroDivisionError, TypeError):
+                    control_value = value
+            normalized[normalized_key] = control_value
+        return normalized
+
+    def _build_video_configuration_kwargs(self) -> Dict[str, Any]:
+        main_cfg = dict(self._picamera_config.get("main", {}))
+        main_cfg.setdefault(
+            "size",
+            (int(self.config.get("width", 640)), int(self.config.get("height", 480))),
+        )
+        main_cfg.setdefault("format", self.config.get("format", "RGB888"))
+
+        video_kwargs: Dict[str, Any] = {"main": main_cfg}
+
+        for optional_key in ("lores", "raw"):
+            if optional_key in self._picamera_config:
+                video_kwargs[optional_key] = self._picamera_config[optional_key]
+
+        for optional_key in ("controls", "buffer_count", "transform", "colour_space"):
+            if optional_key in self._picamera_config:
+                value = self._picamera_config[optional_key]
+                if optional_key == "controls" and isinstance(value, dict):
+                    video_kwargs[optional_key] = self._normalize_controls(value)
+                elif value is not None:
+                    video_kwargs[optional_key] = value
+        return video_kwargs
+
+    def _safe_close_camera(self):
+        if self.camera is None:
+            return
+        try:
+            self.camera.close()
+        except Exception as exc:  # pragma: no cover - closing failures on hardware
+            logger.warning(f"PiCamera close error: {exc}")
+        self.camera = None
+
+    def _resolve_channel_count(self) -> int:
+        fmt = str(self.config.get("format", "RGB888")).upper()
+        if fmt in {"RGB888", "BGR888"}:
+            return 3
+        if fmt in {"RGBA8888", "BGRA8888", "ARGB8888", "ABGR8888", "XRGB8888", "XBGR8888"}:
+            return 4
+        # 기본값: RGB 3채널로 처리
+        return 3
+
+    def _capture_from_buffer(self, stream_name: str) -> Optional[np.ndarray]:
+        if self.camera is None:
+            return None
+
+        buffer = self.camera.capture_buffer(stream_name)
+        if buffer is None:
+            return None
+
+        if isinstance(buffer, np.ndarray):
+            array = buffer
+        elif hasattr(buffer, "array"):
+            array = np.asarray(buffer.array)
+        else:
+            array = np.frombuffer(buffer, dtype=np.uint8)
+
+        channels = self._resolve_channel_count()
+        width = int(self.config.get("width", 640))
+        height = int(self.config.get("height", 480))
+        expected_size = width * height * channels
+
+        if array.size < expected_size:
+            logger.warning(
+                "Picamera buffer smaller than expected (%s < %s)",
+                array.size,
+                expected_size,
+            )
+            return None
+
+        reshaped = np.ascontiguousarray(array[:expected_size]).reshape(
+            height, width, channels
+        )
+
+        fmt = str(self.config.get("format", "RGB888")).upper()
+        if fmt == "BGR888":
+            reshaped = cv2.cvtColor(reshaped, cv2.COLOR_BGR2RGB)
+        elif fmt == "BGRA8888":
+            reshaped = cv2.cvtColor(reshaped, cv2.COLOR_BGRA2RGB)
+        elif fmt in {"RGBA8888", "ARGB8888", "XRGB8888"}:
+            reshaped = cv2.cvtColor(reshaped, cv2.COLOR_RGBA2RGB)
+
+        return reshaped
     
     def open(self) -> bool:
         """
         Picamera2 초기화
         """
-        try:
-            # TODO(PiCameraSource.open, L66-L72): Picamera2 장치 초기화/설정/시작 구현
-            #  - Picamera2 객체 생성 후 해상도, 포맷, FPS 적용
-            #  - start() 호출 전 예외 처리와 로그 추가
-            
-            logger.info("PiCamera opened placeholder (Picamera2 not implemented)")
-            return False  # 실제 구현 전까지 False
-            
-        except Exception as e:
-            logger.error(f"Failed to open PiCamera: {e}")
+        if Picamera2 is None:
+            logger.error(
+                "Picamera2 라이브러리를 찾을 수 없다. `sudo apt install python3-picamera2`로 설치한다."
+            )
             return False
+
+        self._cleanup_callbacks.clear()
+
+        try:
+            self.camera = Picamera2()
+        except Exception as exc:  # pragma: no cover - 하드웨어 의존
+            logger.error(f"Picamera2 인스턴스를 생성하지 못했다: {exc}", exc_info=True)
+            self.camera = None
+            return False
+
+        try:
+            config_kwargs = self._build_video_configuration_kwargs()
+            video_config = self.camera.create_video_configuration(**config_kwargs)
+        except Exception as exc:
+            logger.error(f"Picamera2 설정 생성 실패: {exc}", exc_info=True)
+            self._safe_close_camera()
+            return False
+
+        try:
+            self.camera.configure(video_config)
+        except Exception as exc:
+            logger.error(f"Picamera2 구성 실패: {exc}", exc_info=True)
+            self._safe_close_camera()
+            return False
+
+        try:
+            self.camera.start()
+        except Exception as exc:
+            logger.error(f"Picamera2 시작 실패: {exc}", exc_info=True)
+            self._safe_close_camera()
+            return False
+
+        post_start_controls = self._picamera_config.get("post_start_controls")
+        if isinstance(post_start_controls, dict) and post_start_controls:
+            try:
+                self.camera.set_controls(self._normalize_controls(post_start_controls))
+            except Exception as exc:  # pragma: no cover - 환경 의존
+                logger.warning(f"시작 후 제어값 적용 실패: {exc}")
+
+        # 구성 정보 로그
+        main_cfg = config_kwargs.get("main", {})
+        size = main_cfg.get("size", ("?", "?"))
+        fmt = main_cfg.get("format", self.config.get("format", "RGB888"))
+        fps_config = self._picamera_config.get("controls", {}).get(
+            "FrameRate", self.config.get("fps")
+        )
+        if isinstance(fps_config, Fraction):
+            fps_display = float(fps_config)
+        else:
+            try:
+                fps_display = float(fps_config)
+            except (TypeError, ValueError):
+                fps_display = fps_config
+        logger.info("PiCamera2 started (%sx%s %s @ %s FPS)", size[0], size[1], fmt, fps_display)
+        return True
     
     def read(self) -> Tuple[bool, Optional[np.ndarray]]:
         """
@@ -83,24 +252,58 @@ class PiCameraSource(CameraSource):
             return False, None
         
         try:
-            # TODO(PiCameraSource.read, L85-L90): Picamera2에서 프레임 캡처 후 RGB 변환
-            #  - capture_array 호출 결과 검증 및 예외 처리
-            #  - 필요 시 컬러 포맷 변환 적용
-            
+            with self._lock:
+                if self._use_capture_array:
+                    array = self.camera.capture_array(self._capture_stream)
+                    if array is None:
+                        return False, None
+                    frame = np.ascontiguousarray(array)
+                else:
+                    frame = self._capture_from_buffer(self._capture_stream)
+
+            if frame is None:
+                return False, None
+
+            return True, frame
+
+        except RuntimeError as exc:
+            if self._use_capture_array:
+                logger.warning(
+                    "capture_array 실패로 capture_buffer로 폴백합니다: %s", exc
+                )
+                with self._lock:
+                    frame = self._capture_from_buffer(self._capture_stream)
+                if frame is not None:
+                    return True, frame
+            logger.error(f"Failed to read frame: {exc}", exc_info=True)
             return False, None
-            
         except Exception as e:
-            logger.error(f"Failed to read frame: {e}")
+            logger.error(f"Failed to read frame: {e}", exc_info=True)
             return False, None
     
     def release(self):
         """카메라 해제"""
-        if self.camera is not None:
-            # TODO(PiCameraSource.release, L98-L104): Picamera2 stop/close 호출 추가
-            #  - start 상태 여부 확인 후 stop() 실행
-            #  - 리소스 해제 실패 시 경고 로그 남기기
-            
-            self.camera = None
+        callbacks: List[Tuple[str, Callable[[], None]]] = []
+        released = False
+        with self._lock:
+            if self.camera is not None:
+                try:
+                    self.camera.stop()
+                except Exception as exc:  # pragma: no cover - 하드웨어 의존
+                    logger.warning(f"PiCamera stop error: {exc}")
+                self._safe_close_camera()
+                released = True
+            if self._cleanup_callbacks:
+                callbacks = list(self._cleanup_callbacks)
+                self._cleanup_callbacks.clear()
+
+        for name, callback in callbacks:
+            try:
+                callback()
+            except Exception as exc:
+                logger.warning(f"Cleanup `{name}` failed: {exc}")
+
+        if callbacks or released:
             logger.info("PiCamera released")
     
     def is_opened(self) -> bool:
@@ -214,32 +417,169 @@ class DummySource(CameraSource):
 
 class WebStreamSource(CameraSource):
     """웹 스트리밍 소스 (RTMP, RTSP 등)"""
-    
-    def __init__(self, stream_url: str):
+
+    def __init__(
+        self,
+        stream_url: str,
+        *,
+        retries: Optional[int] = None,
+        retry_delay: Optional[float] = None,
+        auth: Optional[Tuple[str, str]] = None,
+        backend: Optional[str] = None,
+        ffmpeg_options: Optional[Dict[str, str]] = None,
+        open_timeout_ms: Optional[int] = None,
+        read_timeout_ms: Optional[int] = None,
+    ):
         self.stream_url = stream_url
-        self.cap = None
+        self.cap: Optional[cv2.VideoCapture] = None
+        stream_config = CAMERA_CONFIG.get("stream", {})
+        self.retries = max(1, int(retries if retries is not None else stream_config.get("retries", 3)))
+        self.retry_delay = max(0.0, float(retry_delay if retry_delay is not None else stream_config.get("retry_delay", 1.5)))
+        self._backend_name = backend or stream_config.get("backend", "auto")
+        self._backend_flag = self._resolve_backend_flag(self._backend_name)
+        self.ffmpeg_options = dict(ffmpeg_options if ffmpeg_options is not None else stream_config.get("ffmpeg_options", {}))
+        self.auth = auth if auth is not None else self._extract_auth(stream_config.get("auth", {}))
+        self.open_timeout_ms = open_timeout_ms if open_timeout_ms is not None else stream_config.get("open_timeout_ms")
+        self.read_timeout_ms = read_timeout_ms if read_timeout_ms is not None else stream_config.get("read_timeout_ms")
         self.fps = CAMERA_CONFIG["fps"]
-        logger.info(f"WebStreamSource initialized: {stream_url}")
-    
+        logger.info(
+            "WebStreamSource initialized: %s (backend=%s, retries=%s)",
+            stream_url,
+            self._backend_name,
+            self.retries,
+        )
+
+    def _resolve_backend_flag(self, backend_name: Optional[str]) -> Optional[int]:
+        if backend_name is None:
+            return None
+        name = str(backend_name).lower()
+        if name in ("auto", "", "none"):
+            return None
+        if name == "ffmpeg":
+            return getattr(cv2, "CAP_FFMPEG", None)
+        if name in {"gstreamer", "gst"}:
+            return getattr(cv2, "CAP_GSTREAMER", None)
+        if name in {"any", "default"}:
+            return getattr(cv2, "CAP_ANY", None)
+        logger.warning("알 수 없는 스트림 백엔드 `%s`, 기본값을 사용합니다.", backend_name)
+        return None
+
+    def _extract_auth(self, auth_config: Any) -> Optional[Tuple[str, str]]:
+        if not isinstance(auth_config, dict):
+            return None
+        username = auth_config.get("username", "")
+        password = auth_config.get("password", "")
+        if username:
+            return username, password or ""
+        return None
+
+    def _build_authenticated_url(self) -> str:
+        if not self.auth:
+            return self.stream_url
+        parsed = urlparse(self.stream_url)
+        if parsed.username:
+            return self.stream_url
+        username, password = self.auth
+        credentials = username if not password else f"{username}:{password}"
+        netloc = f"{credentials}@{parsed.netloc}"
+        return urlunparse(parsed._replace(netloc=netloc))
+
+    def _compose_ffmpeg_option_string(self) -> Optional[str]:
+        if not self.ffmpeg_options:
+            return None
+        parts = []
+        for key, value in self.ffmpeg_options.items():
+            if value in (None, ""):
+                parts.append(str(key))
+            else:
+                parts.append(f"{key};{value}")
+        return "|".join(parts) if parts else None
+
+    @contextmanager
+    def _ffmpeg_options_context(self):
+        option_string = self._compose_ffmpeg_option_string()
+        if self._backend_flag != getattr(cv2, "CAP_FFMPEG", None) or not option_string:
+            yield
+            return
+
+        previous = os.environ.get("OPENCV_FFMPEG_CAPTURE_OPTIONS")
+        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = option_string
+        try:
+            yield
+        finally:
+            if previous is None:
+                os.environ.pop("OPENCV_FFMPEG_CAPTURE_OPTIONS", None)
+            else:
+                os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = previous
+
+    def _create_capture(self, url: str) -> cv2.VideoCapture:
+        if self._backend_flag is None:
+            return cv2.VideoCapture(url)
+
+        cap = cv2.VideoCapture(url, self._backend_flag)
+        if not cap or not cap.isOpened():
+            logger.warning(
+                "요청한 백엔드(%s)를 사용해 스트림을 열지 못해 기본 백엔드를 시도합니다.",
+                self._backend_name,
+            )
+            if cap:
+                cap.release()
+            cap = cv2.VideoCapture(url)
+        return cap
+
+    def _release_capture(self):
+        if self.cap is not None:
+            try:
+                self.cap.release()
+            except Exception as exc:
+                logger.debug(f"VideoCapture release error: {exc}")
+            self.cap = None
+
     def open(self) -> bool:
         """
         웹 스트림 열기
         """
-        try:
-            # TODO(WebStreamSource.open, L229-L235): RTMP/RTSP 연결 보강
-            #  - 재시도/타임아웃/인증 파라미터 지원
-            #  - OpenCV 실패 시 ffmpeg 파이프 대안 적용
-            
-            self.cap = cv2.VideoCapture(self.stream_url)
-            if self.cap.isOpened():
-                logger.info(f"Web stream opened: {self.stream_url}")
+        authenticated_url = self._build_authenticated_url()
+        last_error: Optional[Exception] = None
+
+        for attempt in range(self.retries):
+            try:
+                with self._ffmpeg_options_context():
+                    self.cap = self._create_capture(authenticated_url)
+                if self.cap is None or not self.cap.isOpened():
+                    raise RuntimeError("VideoCapture.open() 실패")
+
+                # 버퍼 크기 최소화 및 타임아웃 설정
+                self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                if self.open_timeout_ms:
+                    self.cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, float(self.open_timeout_ms))
+                if self.read_timeout_ms:
+                    self.cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, float(self.read_timeout_ms))
+
+                fps = self.cap.get(cv2.CAP_PROP_FPS)
+                self.fps = fps if fps and fps > 1e-6 else CAMERA_CONFIG["fps"]
+                logger.info(
+                    "Web stream opened: %s (attempt %d/%d)",
+                    self.stream_url,
+                    attempt + 1,
+                    self.retries,
+                )
                 return True
-            else:
-                logger.error(f"Failed to open web stream: {self.stream_url}")
-                return False
-        except Exception as e:
-            logger.error(f"Error opening web stream: {e}")
-            return False
+            except Exception as exc:
+                last_error = exc
+                logger.warning(
+                    "Failed to open web stream (%d/%d): %s",
+                    attempt + 1,
+                    self.retries,
+                    exc,
+                )
+                self._release_capture()
+                if attempt < self.retries - 1 and self.retry_delay > 0:
+                    time.sleep(self.retry_delay)
+
+        error_msg = str(last_error) if last_error else "unknown error"
+        logger.error(f"Error opening web stream: {error_msg}")
+        return False
     
     def read(self) -> Tuple[bool, Optional[np.ndarray]]:
         """스트림에서 프레임 읽기"""
@@ -258,7 +598,7 @@ class WebStreamSource(CameraSource):
     def release(self):
         """스트림 해제"""
         if self.cap is not None:
-            self.cap.release()
+            self._release_capture()
             logger.info("Web stream released")
     
     def is_opened(self) -> bool:

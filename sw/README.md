@@ -89,12 +89,14 @@ python3 capture/frame_capture.py \
 | `--source` | `dummy` / `video` / `stream` / `picamera` 중 선택 |
 | `--video-path` | `--source video`일 때 영상 파일 경로 |
 | `--stream-url` | `--source stream`일 때 네트워크 스트림 URL |
-| `--mode` | `single`(단일 스레드) / `multi`(캡처·추론 쓰레드 분리) |
+| `--mode` | `single`(단일 스레드) / `multi`(캡처 스레드 + 추론 프로세스 분리) |
 | `--duration` | 실행 시간 제한(초), 미지정 시 무한 실행 |
 | `--stream-host` | MJPEG 스트리머 호스트 (기본 `0.0.0.0`) |
 | `--stream-port` | 스트리머 포트, 기본값 5000 (0이면 비활성화) |
 
 실행 후 브라우저에서 `http://<호스트>:<포트>/stream.mjpg`(기본 `http://<호스트>:5000/stream.mjpg`)에 접속하면 실시간 프레임을 확인할 수 있다.
+
+자세한 캡처 모듈 설명은 `sw/capture/README.md`를 참고한다.
 
 #### 3.2.1 입력 소스별 예시
 
@@ -130,10 +132,10 @@ python3 capture/frame_capture.py \
       --stream-port 5000
 ```
   - OpenCV가 지원하는 URL이라면 그대로 사용할 수 있다(예: `rtsp://`, `http://`, `https://` 등).
-  - 연결에 오래 걸리거나 실패할 경우 경고 로그가 출력되며, 필요 시 FFmpeg/GStreamer 백엔드로 확장해야 한다.
+  - 연결 실패 시 `CAMERA_CONFIG["stream"]`의 재시도/백엔드/타임아웃 옵션으로 동작을 조정할 수 있다. FFmpeg/GStreamer 백엔드 전환, 인증 정보 삽입도 구성 파일에서 지원한다.
 
 - **Picamera2 (라즈베리 파이 전용)**  
-  TODO(PiCameraSource) 영역을 실제로 구현한 후에만 사용 가능하며, 미구현 상태에서는 `False`를 반환한다.
+  Picamera2 라이브러리가 설치되어 있어야 하며(`sudo apt install -y python3-picamera2`). 해상도/포맷/컨트롤 값은 `CAMERA_CONFIG["picamera"]`에서 세부 조정할 수 있고, 캡처 방식은 배열/버퍼 중 선택 가능하다.
 
 #### 3.2.2 SSH/원격 접속 환경에서 스트림 접근
 
@@ -197,6 +199,8 @@ inference.teardown()
 
 현재는 난수 기반 더미 데이터와 경고 로그만 출력한다. 각 TODO를 구현하면서 실제 모델 로직으로 대체해야 한다.
 
+AI 모듈별 구현 지침은 `sw/ai_model/README.md`를 참고한다.
+
 ---
 
 ## 5. 설정/로그/공통 유틸리티
@@ -207,6 +211,7 @@ inference.teardown()
 | `common/logger.py` | 프로젝트 전역 로깅 설정 |
 | `common/frame_buffer.py` | 스레드 안전 프레임 버퍼 & 성능 모니터링 |
 | `common` 패키지 | `FrameBuffer`, `PerformanceMonitor`, `get_config` 등 노출 |
+| `capture/preprocessor.py` | 현재 스켈레톤(입력 pass-through) 상태로, TODO 구현이 필요함 |
 
 로그 파일은 기본적으로 `sw/logs/app.log`에 기록되며, TODO 영역을 호출하면 `WARNING` 로그로 알려 준다.
 
@@ -222,11 +227,12 @@ inference.teardown()
 | `ai_model/object_detection.py` | TFLite 모델 로딩, YOLO 전/후처리, 추론 파이프라인 |
 | `ai_model/liveness.py` | Mediapipe/Dlib 랜드마크 검출, 움직임/3D 일관성, 판정 로직 |
 | `ai_model/deepfake.py` | 픽셀 패턴, 압축 아티팩트, 시간 일관성 분석 |
-| `capture/frame_capture.py` | 실제 캡처/추론 파이프라인 분리, 재시도 정책 |
+| `capture/frame_capture.py` | 멀티프로세스 모드 고도화(재연결, 헬스체크, 프로세스 종료 복구) |
 | `capture/preprocessor.py` | 고급 리사이즈/정규화/노이즈 제거/대비 강화 옵션 |
-| `capture/camera_source.py` | Picamera2 연동, 웹 스트림 안정화 |
+| `capture/camera_source.py` | 추가 센서/제어 파라미터 노출, 특수 스트림(암호화/토큰) 지원 |
 
 `ai_model/object_detection.py`의 `detect()`는 전처리 → 추론 → 후처리 호출 흐름이 이미 들어 있으므로, `_load_model`, `_preprocess`, `_postprocess`를 실제 모델에 맞게 구현하면 바로 사용할 수 있다.
+`capture/preprocessor.py`는 현재 모든 메서드가 스켈레톤(pass-through)이므로, 전처리 로직을 실제로 작성해야 한다.
 
 TODO 주석 예시:
 
