@@ -4,6 +4,7 @@
 간단한 MJPEG 프레임 스트리머
 - SSH 환경에서 GUI 출력 대신 브라우저로 프레임 확인용
 - FrameCaptureSystem에서 전처리된 프레임을 전달해 사용
+- 구현 완료
 """
 
 import threading

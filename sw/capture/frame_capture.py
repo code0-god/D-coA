@@ -6,6 +6,7 @@
 - 전처리 수행
 - AI 추론 모듈 호출
 - Producer-Consumer 패턴 구현
+- 구현 완료
 """
 
 import sys
