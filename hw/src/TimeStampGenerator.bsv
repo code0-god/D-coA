@@ -1,12 +1,11 @@
 // TimestampGenerator.bsv
-
-package GenerateTimestamp;
+package TimestampGenerator;
 
 import Types::*;
 
 // 인터페이스
-interface GenerateTimestamp;
-    method Action syncTime(Bit#(TIMESTAMP_WIDTH) unixTime);         // 절대초 동기화
+interface TimestampGenerator;
+    method Action syncTime(Bit#(TIMESTAMP_WIDTH) unixTime);           // 절대초 동기화
     method ActionValue#(Bit#(TIMESTAMP_WIDTH)) getCurrentTimestamp(); // 현재 초 단위 타임스탬프
     method Bit#(32) getCycleCount();                                  // 1초 경계까지 사이클 카운트(디버깅)
 endinterface
@@ -15,7 +14,7 @@ endinterface
 //  - clockFreqHz: 시스템 클록(Hz), 예: 100_000_000 (100MHz)
 //  - 같은 rule에서 같은 레지스터를 두 번 쓰지 않도록 if/else 분기
 (* synthesize *)
-module mkGenerateTimestamp #(Integer clockFreqHz) (GenerateTimestamp);
+module mkTimestampGenerator #(Integer clockFreqHz) (TimestampGenerator);
 
     // 초 단위 Unix epoch
     Reg#(Bit#(TIMESTAMP_WIDTH)) currentTime <- mkReg(0);
