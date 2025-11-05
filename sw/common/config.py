@@ -64,7 +64,7 @@ CAMERA_CONFIG = {
 # AI 모델 설정
 MODEL_CONFIG = {
     "yolo": {
-        "model_path": MODEL_DIR / "yolov5n.tflite",
+        "model_path": MODEL_DIR / "yolov5n-fp16.tflite",
         "confidence_threshold": 0.5,
         "iou_threshold": 0.4,
         "target_classes": [0]  # COCO: 0 = person
@@ -120,3 +120,20 @@ def get_config(section: str = None):
     if section:
         return configs.get(section, {})
     return configs
+
+
+# COCO 데이터셋 이름 매핑
+COCO80_NAMES = [
+    "person","bicycle","car","motorcycle","airplane","bus","train","truck","boat",
+    "traffic light","fire hydrant","stop sign","parking meter","bench","bird","cat",
+    "dog","horse","sheep","cow","elephant","bear","zebra","giraffe","backpack",
+    "umbrella","handbag","tie","suitcase","frisbee","skis","snowboard","sports ball",
+    "kite","baseball bat","baseball glove","skateboard","surfboard","tennis racket",
+    "bottle","wine glass","cup","fork","knife","spoon","bowl","banana","apple",
+    "sandwich","orange","broccoli","carrot","hot dog","pizza","donut","cake",
+    "chair","couch","potted plant","bed","dining table","toilet","tv","laptop",
+    "mouse","remote","keyboard","cell phone","microwave","oven","toaster","sink",
+    "refrigerator","book","clock","vase","scissors","teddy bear","hair drier","toothbrush",
+]
+ID2NAME = {i:n for i, n in enumerate(COCO80_NAMES)}
+NAME2ID = {n:i for i, n in ID2NAME.items()}

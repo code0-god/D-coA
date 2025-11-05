@@ -16,6 +16,10 @@ from typing import Tuple, Dict, Optional
 import time
 from collections import deque
 
+import mediapipe as mp
+# import dlib
+import os
+
 from common.config import MODEL_CONFIG
 from common.logger import get_logger
 
@@ -42,30 +46,61 @@ class LivenessDetector:
         """
         if self.model_type == "mediapipe":
             # TODO(LivenessDetector._load_detector, L43-L49): Mediapipe FaceMesh 초기화
-            #  - FaceMesh 파이프라인 생성 및 파라미터 설정
-            #  - detector lifecycle 관리 코드 추가
-            logger.warning(
-                "LivenessDetector: Mediapipe FaceMesh 초기화가 구현되지 않았습니다. "
-                "더미 랜드마크를 사용합니다."
+            #  - FaceMesh 파이프라인 생성 및 파라미터 설정 
+            #  - detector lifecycle 관리 코드 추가#!/usr/bin/env python3
+            # -*- coding: utf-8 -*-
+            # FaceMesh 파이프라인 생성 및 파라미터 설정 
+            self.detector = mp.solutions.face_mesh.FaceMesh(
+                static_image_mode=False, # 영상
+                max_num_faces=3, # 감지할 얼굴 최대 개수
+                refine_landmarks=True, # 세밀 탐지
+                min_detection_confidence=0.5, # 감지 신뢰도 임계값
+                min_tracking_confidence=0.5 # 추적 신뢰도 임계값
             )
+
+            # detector lifecycle 관리 코드 추가
+            if not hasattr(self, "_closeables"):
+                self._closeables = []
+            self._closeables.append(self.detector)
+
+
+
+            # logger.warning(
+            #     "LivenessDetector: Mediapipe FaceMesh 초기화가 구현되지 않았습니다. "
+            #     "더미 랜드마크를 사용합니다."
+            # )
             
-            logger.info("LivenessDetector using Mediapipe (placeholder)")
+            # logger.info("LivenessDetector using Mediapipe (placeholder)")
             
         elif self.model_type == "dlib":
             # TODO(LivenessDetector._load_detector, L51-L56): Dlib 검출기/랜드마크 모델 로딩
             #  - frontal face detector 및 shape predictor 초기화
             #  - 모델 파일 경로 설정 및 예외 처리
-            logger.warning(
-                "LivenessDetector: Dlib 검출기 로딩이 구현되지 않았습니다. "
-                "더미 랜드마크를 사용합니다."
-            )
+
+            # 모델 파일 경로 설정 및 예외 처리
+            model_path = "sw/ai_model/models/shape_predictor_68_face_landmarks.dat"
+
+            if not os.path.exists(model_path):
+                raise FileNotFoundError(
+                    f"Dlib 모델 파일이 없습니다: {model_path}\n"
+                    "http://dlib.net/files/shape_predictor_68_face_landmarks.dat.bz2 에서 다운로드 후 저장하세요."
+                )
             
-            logger.info("LivenessDetector using Dlib (placeholder)")
+            # frontal face detector 및 shape predictor 초기화
+            self.detector = dlib.get_frontal_face_detector()
+            self.predictor = dlib.shape_predictor(model_path)
+            
+            # logger.warning(
+            #     "LivenessDetector: Dlib 검출기 로딩이 구현되지 않았습니다. "
+            #     "더미 랜드마크를 사용합니다."
+            # )
+            
+            # logger.info("LivenessDetector using Dlib (placeholder)")
         
         else:
             logger.warning(f"Unknown model type: {self.model_type}")
         
-        self.detector_loaded = False
+        self.detector_loaded = True # !!
     
     def _detect_landmarks(self, frame: np.ndarray) -> Optional[np.ndarray]:
         """
@@ -80,15 +115,65 @@ class LivenessDetector:
         # TODO(LivenessDetector._detect_landmarks, L72-L88): 실제 랜드마크 검출 구현
         #  - detector/process 호출 후 (N,2) 좌표 배열 반환
         #  - 얼굴 미검출 시 None 반환 처리
-        logger.warning(
-            "LivenessDetector._detect_landmarks: 실제 랜드마크 검출 대신 더미 값을 반환합니다."
-        )
+
+
+        # logger.warning(
+        #     "LivenessDetector._detect_landmarks: 실제 랜드마크 검출 대신 더미 값을 반환합니다."
+        # )
         
         if self.model_type == "mediapipe":
-            pass
+            try:
+                # detector/process 호출
+                results = self.detector.process(frame)
+
+                # 미검출 시 None 반환
+                if not results.multi_face_landmarks:
+                    return None
+
+
+                height, width, _ = frame.shape
+                all_landmarks = []
+
+                for face_landmarks in results.multi_face_landmarks:
+                    # 각 얼굴의 (N, 2) 좌표 생성
+                    landmarks = np.array(
+                        [(lm.x * width, lm.y * height) for lm in face_landmarks.landmark],
+                        dtype=np.float32
+                    )
+                    all_landmarks.append(landmarks)
+
+                # 여러 얼굴의 좌표를 하나로 합친 (M, N, 2) 배열 반환
+                return np.array(all_landmarks, dtype=np.float32)
+
+
+            # 오류 처리
+            except Exception as e:
+                logger.error(f"Mediapipe landmarks 검출 실패: {e}")
+                return None
         
         elif self.model_type == "dlib":
-            pass
+            try:
+                # detector/process 호출
+                faces = self.detector(frame, 1)
+                if len(faces) == 0:
+                    return None
+
+                all_landmarks = []
+
+                for face in faces:
+                    # 각 얼굴 내 픽셀 좌표 추출 및 저장
+                    shape = self.predictor(frame, face)
+                    landmarks = np.array(
+                        [(p.x, p.y) for p in shape.parts()],
+                        dtype=np.float32
+                    )
+                    all_landmarks.append(landmarks)
+
+                return np.array(all_landmarks, dtype=np.float32)
+
+            except Exception as e:
+                logger.error(f"Dlib 랜드마크 검출 실패: {e}")
+                return None
         
         # 임시: 더미 랜드마크 (50% 확률로 검출)
         if np.random.rand() > 0.5:
@@ -224,6 +309,15 @@ class LivenessDetector:
         """히스토리 초기화"""
         self.landmark_history.clear()
         logger.debug("Landmark history cleared")
+    
+    def close(self):
+        """detector 리소스 해제"""
+        if hasattr(self, "_closeables"):
+            for c in self._closeables:
+                if hasattr(c, "close"):
+                    c.close()
+        self._closeables.clear()
+
 
 
 if __name__ == "__main__":

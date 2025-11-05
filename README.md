@@ -264,6 +264,14 @@ TODO 주석 예시:
 ### Q4. 실제 모델을 연결하려면?
 - `ai_model` 하위 TODO를 순차적으로 구현한 뒤, 모델 파일을 `sw/ai_model/models/`에 배치하고 config 경로를 수정한다.
 
+### Q5. ModuleNotFound
+의존성 체크 
+example
+```
+python3 -c "import tensorflow; print(tensorflow.__version__)"
+python3 -c "import PIL; print(PIL.__version__)"
+python3 -c "import cv2; print(cv2.__version__)"
+```
 ---
 
 ## 8. 향후 계획 및 권장 워크플로

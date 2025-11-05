@@ -24,3 +24,5 @@ sw/ai_model/models/
 # OS artifacts
 .DS_Store
 Thumbs.db
+
+sw/ai_model/test_img/
