@@ -257,7 +257,7 @@ class ObjectDetector:
     
     def model_test(self):
         from common.config import PROJECT_ROOT, ID2NAME
-        img_path = Path( f'{PROJECT_ROOT}/ai_model/test_img/testset/test4.jpg' )
+        img_path = Path( f'{PROJECT_ROOT}/ai_model/test_img/testset/test6.jpg' )
         img = cv2.imread(str(img_path))
         rgb = img[:, :, ::-1]  # BGR -> RGB
         
@@ -294,7 +294,7 @@ class ObjectDetector:
                 2,
             )
 
-        out_path = Path(f"{PROJECT_ROOT}/ai_model/test_img/output/out_test4.jpg")
+        out_path = Path(f"{PROJECT_ROOT}/ai_model/test_img/output/out_test6.jpg")
         out_path.parent.mkdir(parents=True, exist_ok=True)
         cv2.imwrite(str(out_path), vis)
         
