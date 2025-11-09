@@ -1,50 +1,45 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# 사용법: ./runtb.sh <TopModule> [sim-args...]
-TOP="${1:?usage: $0 <TopModule> [sim-args...]}"  # 예: TbGenerateTimestamp::mkTbTimestampGenerator
+# 사용법: ./runtb.sh Pkg::mkTop [sim-args...]
+# 예:     ./runtb.sh TbTimeStampGenerator::mkTbTimeStampGenerator +bscvcd
+TOP="${1:?usage: $0 <Pkg::mkTop> [sim-args...]}"
+shift || true
 
-# ---- 1) bsc 실행파일 탐색 (bin, inst/bin, 시스템 PATH, 흔한 경로)
-BSC_ROOT="${BSC_ROOT:-$HOME/bsc}"
-BSC=""
+# --- bsc / 라이브러리 경로 ---
+BSC_ROOT="${BSC_ROOT:-$HOME/bsc/inst}"
+export PATH="$BSC_ROOT/bin:$PATH"
 
-_try() { [ -n "${1:-}" ] && [ -x "$1" ] && BSC="$1"; }
-
-_try "$BSC_ROOT/bin/bsc"            || true
-[ -z "$BSC" ] && _try "$BSC_ROOT/inst/bin/bsc"     || true
-[ -z "$BSC" ] && _try "$(command -v bsc 2>/dev/null || true)" || true
-[ -z "$BSC" ] && _try "$(find "$BSC_ROOT" ~ /opt /usr/local -maxdepth 6 -type f -name bsc -perm -u+x 2>/dev/null | head -n1)" || true
-
-if [ -z "$BSC" ]; then
-  echo "ERROR: bsc executable not found. Set BSC_ROOT to your Bluespec install root (contains bin/ or inst/bin)." >&2
-  exit 127
-fi
-
-# ---- 2) BLUESPECDIR 결정 (…/lib/Prelude 가 있어야 함)
+# BLUESPECDIR 미지정이면 자동 추론 (Libraries 우선)
 if [ -z "${BLUESPECDIR:-}" ]; then
-  for d in \
-    "$(dirname "$BSC")/../lib" \
-    "$BSC_ROOT/lib" \
-    "$BSC_ROOT/inst/lib"
-  do
-    if [ -d "$d/Prelude" ]; then
-      export BLUESPECDIR="$d"
-      break
-    fi
+  for d in "$BSC_ROOT/lib/Libraries" "$BSC_ROOT/lib"; do
+    [ -d "$d" ] && { export BLUESPECDIR="$d"; break; }
   done
 fi
-if [ ! -d "${BLUESPECDIR:-}/Prelude" ]; then
-  echo "ERROR: BLUESPECDIR not set or Prelude missing. Set BLUESPECDIR to a directory that contains Prelude/." >&2
-  exit 128
-fi
 
-# ---- 3) 어디서 실행해도 hw 기준으로
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR"
+command -v bsc >/dev/null 2>&1 || { echo "ERROR: bsc not found in PATH"; exit 127; }
+[ -d "${BLUESPECDIR:-/nope}" ] || { echo "ERROR: BLUESPECDIR not a dir: ${BLUESPECDIR:-<unset>}"; exit 128; }
 
+# --- 경로 고정 ---
+cd "$(dirname "$0")"
 mkdir -p build
 
-# ---- 4) 컴파일 + 엘라보 + 실행
-"$BSC" -u -elab -sim -p +:src:tb -g "$TOP" src/*.bsv tb/*.bsv
-"$BSC" -sim -p +:src:tb -e "$TOP" -o build/sim.out
-exec ./build/sim.out "${@:2}"
+PKG="${TOP%%::*}"          # 예) TbTimeStampGenerator
+TOPMOD="${TOP#*::}"        # 예) mkTbTimeStampGenerator
+TBFILE="tb/${PKG}.bsv"     # 예) tb/TbTimeStampGenerator.bsv
+[ -f "$TBFILE" ] || { echo "ERROR: TB file not found: $TBFILE"; exit 2; }
+
+# --- 컴파일 & 엘라보 ---
+bsc -u -elab -sim \
+    -bdir build -simdir build -info-dir build \
+    -p +:$BLUESPECDIR:src:tb \
+    -g "$TOPMOD" "$TBFILE"
+
+# --- 링크 ---
+bsc -sim \
+    -bdir build -simdir build -info-dir build \
+    -p +:$BLUESPECDIR:src:tb \
+    -e "$TOPMOD" -o build/sim.out
+
+# --- 실행 ---
+exec ./build/sim.out "$@"
