@@ -54,7 +54,7 @@ class LivenessDetector:
 
             self.detector = mp.solutions.face_mesh.FaceMesh(
                 static_image_mode=True, # 정지된 이미지, 영상은 False
-                max_num_faces=5, # 감지할 얼굴 최대 개수
+                max_num_faces=1, # 감지할 얼굴 최대 개수
                 refine_landmarks=True, # 세밀 탐지
                 min_detection_confidence=0.5, # 감지 신뢰도 임계값
                 min_tracking_confidence=0.5 # 추적 신뢰도 임계값
@@ -112,7 +112,7 @@ class LivenessDetector:
             frame: 입력 프레임 (H, W, 3) RGB
             
         Returns:
-            landmarks: (M, N, 2) array of (x, y) coordinates, None if not detected
+            landmarks: (N, 2) array of (x, y) coordinates, None if not detected
         """
         # TODO(LivenessDetector._detect_landmarks, L72-L88): 실제 랜드마크 검출 구현
         #  - detector/process 호출 후 (N,2) 좌표 배열 반환
@@ -134,8 +134,6 @@ class LivenessDetector:
 
 
                 height, width, _ = frame.shape
-                all_landmarks = []
-                lm_count = 0
 
                 for face_landmarks in results.multi_face_landmarks:
                     # 각 얼굴의 (N, 2) 좌표 생성
@@ -143,12 +141,10 @@ class LivenessDetector:
                         [(lm.x * width, lm.y * height) for lm in face_landmarks.landmark],
                         dtype=np.float32
                     )
-                    all_landmarks.append(landmarks)
-                    lm_count += 1
 
-                # 여러 얼굴의 좌표를 하나로 합친 (M, N, 2) 배열
-                # print(all_landmarks[0], "\n\n lm count: ", lm_count)
-                return np.array(all_landmarks, dtype=np.float32), lm_count
+                # 여러 얼굴의 좌표를 하나로 합친 (N, 2) 배열
+                # print(all_landmarks[0], "\n\n lm count: ")
+                return np.array(landmarks, dtype=np.float32)
 
 
             # 오류 처리
@@ -189,14 +185,25 @@ class LivenessDetector:
         return None
     
     
-    def _calculate_movement(self, current_landmarks: np.ndarray) -> float:  # 신지웅(calculate_movement)
+    def _calculate_movement(self, current_landmarks: np.ndarray) -> float: 
+        """
+        얼굴 움직임 기반 점수 계산 (프레임 간 평균 이동 거리)
+
+        Args:
+            current_landmarks (np.ndarray): 현재 프레임의 얼굴 랜드마크 좌표 (N, 2)
+
+        Returns:
+            float: 얼굴의 평균 움직임을 0.0~1.0 범위로 정규화한 점수
+        """
+
     
         # 이전 히스토리가 없는 경우
         if len(self.landmark_history) == 0:
             self.landmark_history.append(current_landmarks.copy())  # 현재 랜드마크를 히스토리에 저장
             return 0.0  # 비교 대상이 없으므로 움직임 점수 0.0 반환
 
-        prev_landmarks = self.landmark_history[-1]
+        # prev_landmarks = self.landmark_history[-1]
+        prev_landmarks = np.array(self.landmark_history[-1], dtype=np.float32)
 
         # 형상 불일치 시 계산 스킵
         if prev_landmarks.shape != current_landmarks.shape:
@@ -210,8 +217,8 @@ class LivenessDetector:
         # 평균 이동 거리 (픽셀 단위)
         mean_movement = np.mean(displacement)
 
-        # 정규화 (10px 이동 시 최대 점수 1.0으로 간주)
-        movement_score = float(np.clip(mean_movement / 10.0, 0.0, 1.0))  # 0~1로 제한
+        # 정규화 (50px 이동 시 최대 점수 1.0으로 간주)
+        movement_score = float(np.clip(mean_movement / 50.0, 0.0, 1.0))  # 0~1로 제한
 
         # 히스토리 갱신
         self.landmark_history.append(current_landmarks.copy())
@@ -237,8 +244,8 @@ class LivenessDetector:
 
         N = landmarks.shape[0]
         pts = landmarks.astype(np.float32)
+    
 
-        # print(pts)
         # # mediapipe Face Mesh point인지 확인
         # if landmarks is None or landmarks.shape[0] < 468:
         #     return True
@@ -295,7 +302,7 @@ class LivenessDetector:
         face_width = float(x_max - x_min)
         face_height = float(y_max - y_min)
         aspect_ratio = face_height / (face_width + 1e-6) # 0으로 나누는 경우 방지 
-        aspect_flag = not (1.0 <= aspect_ratio <= 2.0) 
+        aspect_flag = not (1.0 <= aspect_ratio <= 3.0) 
 
         # ---- (B) 좌우 비대칭(눈 중심선 기준) ----
         mid_x = 0.5 * (LE[0] + RE[0])
@@ -316,13 +323,13 @@ class LivenessDetector:
                 dr = abs(pts[ri, 0] - mid_x)
                 diffs.append(abs(dl - dr))
         asymmetry_score = (np.mean(diffs) / (face_scale + 1e-6)) if diffs else 0.0  # 얼굴의 전체 좌우 비대칭 평균 거리 / 얼굴 크기
-        asymmetry_flag = (asymmetry_score > 0.035)
+        asymmetry_flag = (asymmetry_score > 0.065)
             
         # ---- (C) 코–눈 거리 차 비율(원근 대용치) ----
         dL = float(np.linalg.norm(NOSE - LE))
         dR = float(np.linalg.norm(NOSE - RE))
         eye_parallax_ratio = abs(dL - dR) / (inter_ocular + 1e-6) # 두 코-눈 거리 / 두 눈 사이 거리
-        parallax_flag = (eye_parallax_ratio > 0.06) 
+        parallax_flag = (eye_parallax_ratio > 0.10) 
 
         # ---- (D) 삼각형 면적 좌/우 차 (눈-코-입꼬리) ----
         def tri_area(a, b, c): # 신발끈 공식
@@ -330,7 +337,7 @@ class LivenessDetector:
         left_area  = tri_area(LE, NOSE, ML) # 왼쪽 눈, 코, 입꼬리
         right_area = tri_area(RE, NOSE, MR) # 오른쪽 눈, 코, 입꼬리
         area_diff_ratio = abs(left_area - right_area) / (face_scale**2 + 1e-6) # 좌우 면적 차이 비율 
-        area_flag = (area_diff_ratio > 0.015)
+        area_flag = (area_diff_ratio > 0.025)
 
         # ---- (E) 눈선 vs 입선 기울기 차 ----
         def atan_slope(p, q): # 점 (p, q) 사이의 기울기(라디안) 반환
@@ -406,7 +413,6 @@ class LivenessDetector:
             "expression_change": False
         }
 
-        result_list = []
 
         # 임계값 설정
         movement_threshold = float(self.config.get("movement_threshold", 0.015))
@@ -442,141 +448,141 @@ class LivenessDetector:
         
         try:
             # 1. 얼굴 랜드마크 검출
-            landmarks, lm_count = self._detect_landmarks(frame)
-
+            landmarks = self._detect_landmarks(frame)
+            
             if landmarks is None:
                 logger.debug("No face detected for liveness check")
                 return False, result
             
             result["face_detected"] = True
             
-            for i in range(lm_count):
-                # 2. 움직임 분석
-                movement = self._calculate_movement(landmarks[i])
-                result["movement_score"] = float(movement)
-                
-                # 랜드마크 히스토리 업데이트
-                self.landmark_history.append(landmarks[i].copy())
-                
-                # 3. 3D 일관성 검사
-                is_3d_consistent = self._check_3d_consistency(landmarks[i])
-                result["3d_consistent"] = is_3d_consistent
-                
-                # 4. 라이브니스 판정
-                movement_threshold = self.config["movement_threshold"]
-                
-                # TODO(LivenessDetector.verify, L174-L176): 판정 로직 고도화
-                #  - 눈 깜빡임, 표정 변화, 움직임 임계값 조합 규칙 정의
-                # 현재 프레임 신호
-                earL, earR, ear = _eye_ear(landmarks[i])
-                curr_mar = _mouth_mar(landmarks[i])
+            # 2. 움직임 분석
+            movement = self._calculate_movement(landmarks)
+            result["movement_score"] = float(movement)
+            
+            # 랜드마크 히스토리 업데이트
+            # self.landmark_history.append(landmarks.copy())
+            
+            # 3. 3D 일관성 검사
+            is_3d_consistent = self._check_3d_consistency(landmarks)
+            result["3d_consistent"] = is_3d_consistent
+            
+            # 4. 라이브니스 판정
+            movement_threshold = self.config["movement_threshold"]
+            
+            # TODO(LivenessDetector.verify, L174-L176): 판정 로직 고도화
+            #  - 눈 깜빡임, 표정 변화, 움직임 임계값 조합 규칙 정의
+            # 현재 프레임 신호
+            earL, earR, ear = _eye_ear(landmarks)
+            curr_mar = _mouth_mar(landmarks)
+            
+            # 직전 프레임 신호 (없으면 현재값으로 대체)
+            if len(self.landmark_history) >= 2:
+                prev_lm = self.landmark_history[-2]
+                prev_earL, prev_earR, prev_ear = _eye_ear(prev_lm)
+                prev_mar = _mouth_mar(prev_lm)
+            else:
+                prev_earL, prev_earR, prev_ear = earL, earR, ear
+                prev_mar = curr_mar
 
-                # 직전 프레임 신호 (없으면 현재값으로 대체)
-                if len(self.landmark_history) >= 2:
-                    prev_lm = self.landmark_history[-2]
-                    prev_earL, prev_earR, prev_ear = _eye_ear(prev_lm)
-                    prev_mar = _mouth_mar(prev_lm)
-                else:
-                    prev_earL, prev_earR, prev_ear = earL, earR, ear
-                    prev_mar = curr_mar
+            # 이벤트 감지
+            # 양안 동시 깜빡임
+            blink_both = (ear < blink_ear_threshold) and ((prev_ear - ear) > blink_drop_delta)
 
-                # 이벤트 감지
-                # 양안 동시 깜빡임
-                blink_both = (ear < blink_ear_threshold) and ((prev_ear - ear) > blink_drop_delta)
+            # 윙크
+            wink_left = (
+                (earL < blink_ear_threshold) and
+                ((prev_earL - earL) > blink_drop_delta) and
+                (earR > (blink_ear_threshold + wink_open_margin))
+            )
+            wink_right = (
+                (earR < blink_ear_threshold) and
+                ((prev_earR - earR) > blink_drop_delta) and
+                (earL > (blink_ear_threshold + wink_open_margin))
+            )
 
-                # 윙크
-                wink_left = (
-                    (earL < blink_ear_threshold) and
-                    ((prev_earL - earL) > blink_drop_delta) and
-                    (earR > (blink_ear_threshold + wink_open_margin))
-                )
-                wink_right = (
-                    (earR < blink_ear_threshold) and
-                    ((prev_earR - earR) > blink_drop_delta) and
-                    (earL > (blink_ear_threshold + wink_open_margin))
-                )
+            blink_detected = bool(blink_both or wink_left or wink_right) # 한 쪽 윙크 -> 눈 뜸으로 간주
+            expr_changed_now = (abs(curr_mar - prev_mar) > mar_change_delta) or (curr_mar > mar_open_threshold)
 
-                blink_detected = bool(blink_both or wink_left or wink_right) # 한 쪽 윙크 -> 눈 뜸으로 간주
-                expr_changed_now = (abs(curr_mar - prev_mar) > mar_change_delta) or (curr_mar > mar_open_threshold)
-
-                # 결과 기록(필드 추가)
-                result["blink_detected"] = bool(blink_detected)
-                result["wink_left"] = bool(wink_left)
-                result["wink_right"] = bool(wink_right)
-                result["blink_type"] = (
-                    "both" if blink_both else
-                    ("wink_left" if wink_left else
-                    ("wink_right" if wink_right else "none"))
-                )
-                result["expression_change"] = bool(expr_changed_now)
-
-
-                # ---- (안티 스푸핑) 과도한 깜빡임 버스트 감지 ----
-                now_ts = time.time()
-                burst_window_sec = float(self.config.get("blink_burst_window_sec", 1.0))    # 1초동안
-                burst_threshold  = int(self.config.get("blink_burst_threshold", 3))         # 3번 이상 깜빡이면 과하다고 판단
-
-                # history 버퍼 
-                self._blink_times = []  # float timestamps
-
-                # 이번 프레임에 깜빡임/윙크가 감지되면 타임스탬프 기록
-                if blink_detected:
-                    self._blink_times.append(now_ts)
-
-                # 윈도우 밖(현재-윈도) 이전 기록 제거
-                cutoff = now_ts - burst_window_sec
-                self._blink_times = [t for t in self._blink_times if t >= cutoff]
-
-                # 윈도우 내 깜빡임 수가 임계 이상이면 "버스트" 판정
-                blink_burst_count = len(self._blink_times)
-                anti_spoof_blink_burst = (blink_burst_count >= burst_threshold)
-
-                # 결과 기록
-                result["blink_burst_count"] = int(blink_burst_count)
-                result["anti_spoof_blink_burst"] = bool(anti_spoof_blink_burst)
-                
-
-                # 최종 라이브니스 규칙:
-                #  - 얼굴 검출 & 3D 일관성 통과
-                #  - (움직임 임계 이상) OR (깜빡임) OR (표정 변화)
-                is_live = (
-                    result["face_detected"] and             # 얼굴 검출 성공
-                    bool(is_3d_consistent) and              # 3D 일관성 통과
-                    (
-                        (movement >= movement_threshold) or # 얼굴 움직임 있음
-                        blink_detected or                   # 깜빡임/윙크 감지
-                        expr_changed_now                    # 표정 변화 감지
-                    ) and
-                    (not anti_spoof_blink_burst)            # 과도한 깜빡임 없음
-                )
-
-                result["is_live"] = bool(is_live)
+            # 결과 기록(필드 추가)
+            result["blink_detected"] = bool(blink_detected)
+            result["wink_left"] = bool(wink_left)
+            result["wink_right"] = bool(wink_right)
+            result["blink_type"] = (
+                "both" if blink_both else
+                ("wink_left" if wink_left else
+                ("wink_right" if wink_right else "none"))
+            )
+            result["expression_change"] = bool(expr_changed_now)
 
 
-                # # 임시: 간단한 규칙
-                # is_live = (
-                #     result["face_detected"] and
-                #     movement >= movement_threshold and
-                #     is_3d_consistent
-                # )
-                
-                # result["is_live"] = is_live
+            # ---- (안티 스푸핑) 과도한 깜빡임 버스트 감지 ----
+            now_ts = time.time()
+            burst_window_sec = float(self.config.get("blink_burst_window_sec", 1.0))    # 1초동안
+            burst_threshold  = int(self.config.get("blink_burst_threshold", 3))         # 3번 이상 깜빡이면 과하다고 판단
 
-                # logger.warning(
-                #     "LivenessDetector.verify: 간단한 임계값 기반 규칙만 적용됩니다."
-                # )
-                
-                inference_time = time.time() - start_time
-                result["inference_time"] = inference_time
-                result_list.append(result.copy())
-                
-                
-                if is_live:
-                    logger.debug(f"Liveness verified (movement: {movement:.3f}, {inference_time*1000:.1f}ms)")
-                else:
-                    logger.debug(f"Liveness failed (movement: {movement:.3f})")
-                
-                return is_live, result_list
+            # history 버퍼 
+            self._blink_times = []  # float timestamps
+
+            # 이번 프레임에 깜빡임/윙크가 감지되면 타임스탬프 기록
+            if blink_detected:
+                self._blink_times.append(now_ts)
+
+            # 윈도우 밖(현재-윈도) 이전 기록 제거
+            cutoff = now_ts - burst_window_sec
+            self._blink_times = [t for t in self._blink_times if t >= cutoff]
+
+            # 윈도우 내 깜빡임 수가 임계 이상이면 "버스트" 판정
+            blink_burst_count = len(self._blink_times)
+            anti_spoof_blink_burst = (blink_burst_count >= burst_threshold)
+
+            # 결과 기록
+            result["blink_burst_count"] = int(blink_burst_count)
+            result["anti_spoof_blink_burst"] = bool(anti_spoof_blink_burst)
+            
+
+            # 최종 라이브니스 규칙:
+            #  - 얼굴 검출 & 3D 일관성 통과
+            #  - (움직임 임계 이상) OR (깜빡임) OR (표정 변화)
+            is_live = (
+                result["face_detected"] and             # 얼굴 검출 성공
+                (
+                    bool(is_3d_consistent) or
+                    (movement>=movement_threshold)or    #얼굴 움직임 임계값 통과                               # 3D 입체성 (스푸핑 방지) 이 있거나       
+                    blink_detected or                   # 라이브니스 행동 (움직임, 깜빡임, 표정) 이 있거나
+                    expr_changed_now
+                ) and              
+                (not anti_spoof_blink_burst)            # 과도한 깜빡임 없음
+            )
+    
+
+            result["is_live"] = bool(is_live)
+
+
+            # # 임시: 간단한 규칙
+            # is_live = (
+            #     result["face_detected"] and
+            #     movement >= movement_threshold and
+            #     is_3d_consistent
+            # )
+            
+            # result["is_live"] = is_live
+
+            # logger.warning(
+            #     "LivenessDetector.verify: 간단한 임계값 기반 규칙만 적용됩니다."
+            # )
+            
+            inference_time = time.time() - start_time
+            result["inference_time"] = inference_time
+            
+            # print(self.landmark_history)
+            
+            if is_live:
+                logger.debug(f"Liveness verified (movement: {movement:.3f}, {inference_time*1000:.1f}ms)")
+            else:
+                logger.debug(f"Liveness failed (movement: {movement:.3f})")
+            
+            return is_live, result
             
         except Exception as e:
             logger.error(f"Liveness verification error: {e}")
@@ -606,7 +612,7 @@ if __name__ == "__main__":
     # # 더미 프레임
     # frame = np.random.randint(0, 255, (480, 640, 3), dtype=np.uint8)
     
-    for i in range(5):      # L609-616 : 최지예 수정
+    for i in range(4):      # L609-616 : 최지예 수정
         img_path = f"/srv/D-coA/sw/ai_model/test_img/testset2/test{i+1}.jpg" 
         frame_bgr = cv2.imread(img_path)
         
