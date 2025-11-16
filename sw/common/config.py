@@ -78,7 +78,7 @@ MODEL_CONFIG = {
         "pixel_analysis": True,
         "compression_check": True,
         "temporal_consistency": True,
-        "threshold": 0.7
+        "threshold": 0.55
     }
 }
 
