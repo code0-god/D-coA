@@ -26,3 +26,5 @@ sw/ai_model/models/
 Thumbs.db
 
 sw/ai_model/test_img/
+sw/capture/tests/video
+sw/capture/tests_video_preprocessor
