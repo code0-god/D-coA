@@ -10,6 +10,8 @@ import sys
 import argparse
 import signal
 
+from unicodedata import east_asian_width
+
 from capture.frame_capture import FrameCaptureSystem
 from common.logger import get_logger
 from common.config import get_config
@@ -33,17 +35,39 @@ def signal_handler(signum, frame):
 
 def print_banner():
     """배너 출력"""
-    banner = """
-╔═══════════════════════════════════════════════════════════════╗
-║                                                               ║
-║   AI-블록체인 기반 미디어 무결성 모듈                          ║
-║   Google-아주대학교 AI 융합 캡스톤 디자인                      ║
-║                                                               ║
-║   팀원: 유성현, 최지예, 신지웅, 김서연, 임수인, 정영신                ║
-║                                                               ║
-╚═══════════════════════════════════════════════════════════════╝
-"""
-    print(banner)
+
+    def display_width(text: str) -> int:
+        """표시 폭 계산"""
+        width_map = {"F", "W"}
+        return sum(2 if east_asian_width(ch) in width_map else 1 for ch in text)
+
+    def center_text(text: str, target_width: int) -> str:
+        """표시 폭 기준 가운데 정렬"""
+        current = display_width(text)
+        remaining = max(0, target_width - current)
+        left = remaining // 2
+        right = remaining - left
+        return f"{' ' * left}{text}{' ' * right}"
+
+    lines = [
+        "",
+        "AI-블록체인 기반 미디어 무결성 모듈",
+        "Google-아주대학교 AI 융합 캡스톤 디자인",
+        "",
+        "팀원: 유성현, 최지예, 신지웅, 김서연, 임수인, 정영신",
+        "",
+    ]
+    padding = 3
+    content_width = max(display_width(line) for line in lines)
+    total_inner_width = max(63, content_width + padding * 2)
+    horizontal = "═" * total_inner_width
+    text_width = total_inner_width - padding * 2
+    
+    print(f"╔{horizontal}╗")
+    for line in lines:
+        centered = center_text(line, text_width)
+        print(f"║{' ' * padding}{centered}{' ' * padding}║")
+    print(f"╚{horizontal}╝")
 
 
 def print_system_info():
