@@ -22,3 +22,7 @@ scikit-learn>=1.0.0
 # 개발 도구
 pytest>=7.0.0
 pytest-cov>=3.0.0
+
+# 블록체인 + P2P 노드
+flask>=2.2.0
+requests>=2.28.0
